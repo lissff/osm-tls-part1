@@ -56,7 +56,8 @@ spec:
 ### Update your Ingress rules:   
 - refer to letsencrypt as cluster issuer
 - refer to ingress-tls to be your secretName
-- refer to the right host(cert-manager will manage it)
+- refer to the right host(cert-manager will manage it)  
+
 ```
 - apiVersion: networking.k8s.io/v1
   kind: Ingress
