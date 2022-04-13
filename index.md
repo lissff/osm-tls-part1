@@ -1,37 +1,141 @@
-## Welcome to GitHub Pages
+# OSM with HTTPS Ingress Controller 
+* TOC
+{:toc}
 
-You can use the [editor on GitHub](https://github.com/lissff/osm-tls-part1/edit/gh-pages/index.md) to maintain and preview the content for your website in Markdown files.
+## Background
+Now we have our [demo application](https://lissff.github.io/osm-part1/) running perfectly, and ingress controller is not complaining about anything.  
+We are going to face the reality-- people using service mesh because it is   
+**flexible**: different team works on different microservices and they only need to care about the interfaces exposed;  
+**secure**: policies and mTLS can be enforced between services;  
+Given that they might be owned by different org and communication between pairs of microservices must be authenticated and encrypted.
 
-Whenever you commit to this repository, GitHub Pages will run [Jekyll](https://jekyllrb.com/) to rebuild the pages in your site, from the content in your Markdown files.
+If you don't know what is certificate chain and how ingress-nginx TLS termination works,  you need to do some research before taking the next step. 
 
-### Markdown
+When talking about HTTPS Ingress Controller, most of the people are referring to this model where TLS terminates at Ingress-Nginx:
+![alt text for screen readers](./images/non-TLS.jpg "TLS termination")
+But we know sometimes that's not enough and sometimes we need to ensure end-to-end TLS(we will talk about it in another session):
+![alt text for screen readers](./images/TLS.jpg "End-to-End TLS").
 
-Markdown is a lightweight and easy-to-use syntax for styling your writing. It includes conventions for
+## Create an Ingress Controller with Cert-manager
+### Install Cert-manager
+```
+# Label the ingress-basic namespace to disable resource validation
+kubectl label namespace ingress-basic cert-manager.io/disable-validation=true
 
-```markdown
-Syntax highlighted code block
+helm repo add jetstack https://charts.jetstack.io
 
-# Header 1
-## Header 2
-### Header 3
+helm repo update
 
-- Bulleted
-- List
+helm install cert-manager jetstack/cert-manager \
+  --namespace ingress-basic \
+  --version $CERT_MANAGER_TAG \
+  --set installCRDs=true \
+  --set nodeSelector."kubernetes\.io/os"=linux \
+```
+Create your own CA issuer:
+```
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: lissff@something.com
+    privateKeySecretRef:
+      name: letsencrypt
+    solvers:
+    - http01:
+        ingress:
+          class: nginx
+          podTemplate:
+            spec:
+              nodeSelector:
+                "kubernetes.io/os": linux
+```
+### Update your Ingress rules:   
+- refer to letsencrypt as cluster issuer
+- refer to ingress-tls to be your secretName
+- refer to the right host(cert-manager will manage it)
+```
+- apiVersion: networking.k8s.io/v1
+  kind: Ingress
+  metadata:
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt
+      nginx.ingress.kubernetes.io/rewrite-target: /$2
+      nginx.ingress.kubernetes.io/use-regex: "true"
+    name: test-ingress
+    namespace: osm
+  spec:
+    ingressClassName: nginx
+    rules:
+    - host: osm-tls.canadacentral.cloudapp.azure.com
+      http:
+        paths:
+        - backend:
+            service:
+              name: whoami
+              port:
+                number: 80
+          path: /whoami(/|$)(.*)
+          pathType: Prefix
+        - backend:
+            service:
+              name: azure-vote-front
+              port:
+                number: 80
+          path: /vote(/|$)(.*)
+          pathType: Prefix
+    tls:
+    - hosts:
+      - osm-tls.canadacentral.cloudapp.azure.com
+      secretName: ingress-tls
+```
+### Allow Certificate Challenge in IngressBackend
+After everything is done, you can verify the process by
+```
+$ kubectl get certificate --namespace osm
+```
+If your certificate is created before enabling service mesh then we are happy now. But if OSM was enabled in the first place, you will notice that the certificate is just stuck in UnReady status forever:   
+```
+NAME          READY   SECRET        AGE
+ingress-tls   False    ingress-tls   12m
+```
+If you check the events for certificateRequest and it is probabaly telling you the request is not been aproved. And checking the ingress-controller log, it would tell you the challenge failed to reach your backend service:
 
-1. Numbered
-2. List
-
-**Bold** and _Italic_ and `Code` text
-
-[Link](url) and ![Image](src)
+```
+ [error] 384#384: *107642 recv() failed (104: Connection reset by peer) while reading response header from upstream, client: 10.240.0.105, server: osm-tls.canadacentral.cloudapp.azure.com, request: "GET /.well-known/acme-challenge/mPtGqYkqEKmcED7cPJ0cpj4jeORD0mMNzkdLjH6_3Uc HTTP/1.1", upstream: "http://10.240.0.112:8089/.well-known/acme-challenge/mPtGqYkqEKmcED7cPJ0cpj4jeORD0mMNzkdLjH6_3Uc", host: "osm-tls.canadacentral.cloudapp.azure.com"
 ```
 
-For more details see [Basic writing and formatting syntax](https://docs.github.com/en/github/writing-on-github/getting-started-with-writing-and-formatting-on-github/basic-writing-and-formatting-syntax).
+This is because cert-manager will run a one-off challenge service called cm-acme-http-solver-*** and then removes itself as long as DNS and the hostname have been configured correctly.   
+For me I just added the challenge service name to my ingressbackend and issue resolved:
+```
+  - name: cm-acme-http-solver-p7m8j
+    port:
+      number: 8089
+      protocol: http
+```
+But I don't think it is an elegant solution because the challenge is transient and you need to know the name first, you could remove it after everything is working again of course. Or you could just make certificate and everything configured before enabling OSM in your namespace.
 
-### Jekyll Themes
+### Verify your certificate
+```
+openssl s_client -connect osm-tls.canadacentral.cloudapp.azure.com -showcerts
+```
+You will see something like this: a beautiful 3 layer certificate chain with your host name in server CN:
+```
+CONNECTED(00000005)
+depth=2 C = US, O = Internet Security Research Group, CN = ISRG Root X1
+verify return:1
+depth=1 C = US, O = Let's Encrypt, CN = R3
+verify return:1
+depth=0 CN = osm-tls.canadacentral.cloudapp.azure.com
+verify return:1
+---
+...
+```
 
-Your Pages site will use the layout and styles from the Jekyll theme you have selected in your [repository settings](https://github.com/lissff/osm-tls-part1/settings/pages). The name of this theme is saved in the Jekyll `_config.yml` configuration file.
-
-### Support or Contact
-
-Having trouble with Pages? Check out our [documentation](https://docs.github.com/categories/github-pages-basics/) or [contact support](https://support.github.com/contact) and we’ll help you sort it out.
+what's next  
+End-To-End with Nginx Ingress
+gRPC in nginx ingress
+understand certificate chain
