@@ -13,7 +13,7 @@ If you don't know what is certificate chain and how ingress-nginx TLS terminatio
 
 When talking about HTTPS Ingress Controller, most of the people are referring to this model where TLS terminates at Ingress-Nginx:
 ![alt text for screen readers](./images/non-TLS.jpg "TLS termination")
-But we know sometimes that's not enough and sometimes we need to ensure end-to-end TLS(we will talk about it in another session):
+But we know sometimes that's not enough and sometimes we need to ensure end-to-end TLS(we will talk about it in [another session](https://lissff.github.io/osm-tls-part2/)):
 ![alt text for screen readers](./images/TLS.jpg "End-to-End TLS").
 
 ## Create an Ingress Controller with Cert-manager
